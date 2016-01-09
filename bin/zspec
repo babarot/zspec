@@ -1,0 +1,994 @@
+#!/usr/bin/env zsh
+
+# end is reserved word
+disable -r end
+
+typeset is_verbose_at_main=false
+
+# test status
+typeset -a test_suites
+typeset -i test_failed=0
+typeset -i test_passed=0
+
+# grammer
+typeset -i zspec_indent=0
+typeset -i zspec_it=0
+typeset -i zspec_describe=0
+
+autoload -Uz colors; colors
+autoload -Uz add-zsh-hook
+add-zsh-hook zshexit pre_exit
+
+# print {{{1
+die() {
+    builtin printf -- "$@" >&2
+}
+
+put() {
+    builtin printf -- "$@"
+}
+
+ink() { #{{{2
+    local -i tty=1
+    local    color is_bold=false
+    local -a text
+
+    while (( $# > 0 )); do
+        case "$1" in
+            --color)
+                if [[ ! $2 =~ ^(black|blue|cyan|default|green|grey|magenta|red|white|yellow)$ ]]; then
+                    return 1
+                fi
+                color="$2"; shift
+                ;;
+            --bold)
+                is_bold=true
+                ;;
+            --tty)
+                tty="$2"; shift
+                ;;
+            *)
+                text+=("$1")
+                ;;
+        esac
+        shift
+    done
+
+    if $is_bold; then
+        color="$fg_bold[$color]"
+    else
+        color="$fg_no_bold[$color]"
+    fi
+
+    case $tty in
+        1)
+            put "${color}${text}${reset_color}"
+            ;;
+        2)
+            die "${color}${text}${reset_color}"
+            ;;
+    esac
+}
+
+log() { #{{{2
+    local    state
+    local -i indent=0
+    local    skip=false title text
+    local    bold color spaces
+    local -i tty=1
+
+    state="$1"; shift
+    case "$state" in
+        TITLE)
+            color="white"
+            ;;
+        INFO)
+            color="yellow"
+            bold="--bold"
+            ;;
+
+        WARN)
+            color="red"
+            tty=2
+            ;;
+        ERROR)
+            color="red"
+            bold="--bold"
+            tty=2
+            ;;
+
+        PASS)
+            color="green"
+            bold="--bold"
+            ;;
+        SUCCESS)
+            color="green"
+            ;;
+
+        FAIL)
+            color="red"
+            bold="--bold"
+            ;;
+        FAILURE)
+            color="red"
+            tty=2
+            ;;
+        FAILURE2)
+            color="red"
+            bold="--bold"
+            tty=2
+            ;;
+
+        NONE)
+            text="$1"
+            ;;
+
+        *)
+            return 1
+            ;;
+    esac
+
+    while (( $# > 0 )); do
+        case "$1" in
+            --skip-date)
+                skip=true
+                ;;
+            --indent)
+                indent="$2"; shift
+                ;;
+            --title)
+                title="$2"; shift
+                ;;
+            -*|--*)
+                return 1
+                ;;
+            *)
+                text="$1"
+        esac
+        shift
+    done
+    text="${title:+"${title}: "}$text"
+
+    if $skip; then
+        put "          "
+    else
+        ink --color white "["
+        ink --color magenta --bold "$(date +%H:%M:%S)"
+        ink --color white "]"
+    fi
+    repeat $indent { spaces="$spaces "; }
+    ink --color "$color" --tty "$tty" $bold " ${spaces}${text}"
+}
+
+# helpers {{{1
+show_test_flags() {
+    local -i i
+
+    for i in "${test_suites[@]}"
+    do
+        case "$i" in
+            0)
+                ink --color "green" --tty 1 "."
+                ;;
+            1)
+                ink --color "red" --tty 1 "F"
+                ;;
+            *)
+                ink --color "red" --tty 1 "X"
+                ;;
+        esac
+    done
+    (( $#test_suites > 0 )) && put "\n"
+}
+
+validator() {
+    local end_keyword
+
+    while (( zspec_indent-- != 0 ))
+    do
+        if (( zspec_it != 0 )); then
+            end_keyword="it"
+            let zspec_it--
+        elif (( zspec_describe != 0 )); then
+            end_keyword="describe"
+            let zspec_describe--
+        fi
+        log WARN "you should use 'end' keyword ending with '${end_keyword}'\n"
+    done
+}
+
+pre_exit() {
+    validator
+}
+
+# syntax {{{1
+describe() {
+    let zspec_indent++
+    zspec_describe=1
+    if (( $# == 0 )); then
+        log WARN "you should give the description to 'describe'\n"
+    else
+        $is_verbose_at_main && \
+            log INFO "$1\n"
+    fi
+}
+
+it() {
+    let zspec_indent++
+    zspec_it=1
+    if (( zspec_describe == 0 )); then
+        log ERROR "$funcstack[1]: must be used in 'describe' block\n"
+    fi
+    if (( $# == 0 )); then
+        log WARN "you should give the description to 'it'\n"
+    else
+        $is_verbose_at_main && \
+            log TITLE --indent 2 "$1\n"
+    fi
+}
+
+end() {
+    let zspec_indent--
+    if (( zspec_it == 1 )); then
+        zspec_it=0
+    elif (( zspec_describe == 1 )); then
+        zspec_describe=0
+    fi
+
+    (( zspec_indent >= 0 )) && return 0
+    log ERROR "$funcstack[1]: unexpected 'end' word\n"
+    exit 1
+}
+
+assert.true() #{{{1
+{
+    local -i expect actual
+
+    if (( $# != 1 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    expect=0
+    actual=$argv[1]
+
+    if [[ $expect == $actual ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$expect] to be true\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.true()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: $expect\n"
+        log FAILURE --indent 4 --skip-date "       got: $actual\n\n"
+    fi
+}
+
+assert.false() #{{{1
+{
+    local -i expect actual
+
+    if (( $# != 1 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    expect=1
+    actual=$argv[1]
+
+    if [[ $expect == $actual ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$expect] to be false\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.false()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: $expect\n"
+        log FAILURE --indent 4 --skip-date "       got: $actual\n\n"
+    fi
+}
+
+assert.compare() #{{{1
+{
+    local    operater
+    local -i expect actual
+
+    if (( $# != 3 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    expect=$argv[1]
+    operater=$argv[2]
+    actual=$argv[3]
+
+    eval "(( $expect $operater $actual ))"
+    if [[ $status -eq 0 ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Ok: (( $expect $operater $actual ))\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.compare()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: (( $expect $operater X ))\n"
+        log FAILURE --indent 4 --skip-date "       got: (( $expect $operater $actual ))\n\n"
+    fi
+}
+
+assert.equals() #{{{1
+{
+    local expect actual
+
+    if (( $# != 2 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    expect=$argv[1]
+    actual=$argv[2]
+
+    if [[ $expect == $actual ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$expect] to equal [$actual]\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.equals()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: $expect\n"
+        log FAILURE --indent 4 --skip-date "       got: $actual\n\n"
+    fi
+}
+
+assert.not_equals() #{{{1
+{
+    local expect actual
+
+    if (( $# != 2 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    expect=$argv[1]
+    actual=$argv[2]
+
+    if [[ $expect != $actual ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$expect] not to equal [$actual]\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.not_equals()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: not $expect\n"
+        log FAILURE --indent 4 --skip-date "       got:     $actual\n\n"
+    fi
+}
+
+assert.same() #{{{1
+{
+    :
+}
+
+assert.not_same() #{{{1
+{
+    :
+}
+
+assert.match() #{{{1
+{
+    local expect actual
+
+    if (( $# != 2 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    expect=$argv[1]
+    actual=$argv[2]
+
+    if [[ $actual =~ $expect ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$expect] to match [$actual]\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.match()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: $expect\n"
+        log FAILURE --indent 4 --skip-date "       got: $actual\n\n"
+    fi
+}
+
+assert.not_match() #{{{1
+{
+    local expect actual
+
+    if (( $# != 2 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    expect=$argv[1]
+    actual=$argv[2]
+
+    if [[ ! $actual =~ $expect ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$expect] not to match [$actual]\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.match()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: not $expect\n"
+        log FAILURE --indent 4 --skip-date "       got:     $actual\n\n"
+    fi
+}
+
+assert.is_scalar() #{{{1
+{
+    local var_name
+    local expect actual
+
+    if (( $# != 1 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    var_name=$argv[1]
+    expect="scalar"
+    actual="$(eval "echo $(printf '${(t)%s}' $var_name)")"
+
+    if [[ $actual =~ ^$expect ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$var_name] to be $expect\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.is_scalar()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: $expect\n"
+        log FAILURE --indent 4 --skip-date "       got: $actual\n\n"
+    fi
+}
+
+assert.is_not_scalar() #{{{1
+{
+    local var_name
+    local expect actual
+
+    if (( $# != 1 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    var_name=$argv[1]
+    expect="scalar"
+    actual="$(eval "echo $(printf '${(t)%s}' $var_name)")"
+
+    if [[ ! $actual =~ ^$expect ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$var_name] to be not $expect\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.is_not_scalar()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: not $expect\n"
+        log FAILURE --indent 4 --skip-date "       got:     $actual\n\n"
+    fi
+}
+
+assert.is_array() #{{{1
+{
+    local var_name
+    local expect actual
+
+    if (( $# != 1 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    var_name=$argv[1]
+    expect="array"
+    actual="$(eval "echo $(printf '${(t)%s}' $var_name)")"
+
+    if [[ $actual =~ ^$expect ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$var_name] to be $expect\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.is_array()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: $expect\n"
+        log FAILURE --indent 4 --skip-date "       got: $actual\n\n"
+    fi
+}
+
+assert.is_not_array() #{{{1
+{
+    local var_name
+    local expect actual
+
+    if (( $# != 1 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    var_name=$argv[1]
+    expect="array"
+    actual="$(eval "echo $(printf '${(t)%s}' $var_name)")"
+
+    if [[ ! $actual =~ ^$expect ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$var_name] to be not $expect\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.is_not_array()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: not $expect\n"
+        log FAILURE --indent 4 --skip-date "       got:     $actual\n\n"
+    fi
+}
+
+assert.is_integer() #{{{1
+{
+    local var_name
+    local expect actual
+
+    if (( $# != 1 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    var_name=$argv[1]
+    expect="integer"
+    actual="$(eval "echo $(printf '${(t)%s}' $var_name)")"
+
+    if [[ $actual =~ ^$expect ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$var_name] to be $expect\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.is_integer()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: $expect\n"
+        log FAILURE --indent 4 --skip-date "       got: $actual\n\n"
+    fi
+}
+
+assert.is_not_integer() #{{{1
+{
+    local var_name
+    local expect actual
+
+    if (( $# != 1 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    var_name=$argv[1]
+    expect="integer"
+    actual="$(eval "echo $(printf '${(t)%s}' $var_name)")"
+
+    if [[ ! $actual =~ ^$expect ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$var_name] to be not $expect\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.is_not_integer()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: not $expect\n"
+        log FAILURE --indent 4 --skip-date "       got:     $actual\n\n"
+    fi
+}
+
+assert.is_float() #{{{1
+{
+    local var_name
+    local expect actual
+
+    if (( $# != 1 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    var_name=$argv[1]
+    expect="float"
+    actual="$(eval "echo $(printf '${(t)%s}' $var_name)")"
+
+    if [[ $actual =~ ^$expect ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$var_name] to be not $expect\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.is_float()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: $expect\n"
+        log FAILURE --indent 4 --skip-date "       got: $actual\n\n"
+    fi
+}
+
+assert.is_not_float() #{{{1
+{
+    local var_name
+    local expect actual
+
+    if (( $# != 1 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    var_name=$argv[1]
+    expect="float"
+    actual="$(eval "echo $(printf '${(t)%s}' $var_name)")"
+
+    if [[ ! $actual =~ ^$expect ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$var_name] to be not $expect\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.is_not_float()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: not $expect\n"
+        log FAILURE --indent 4 --skip-date "       got:     $actual\n\n"
+    fi
+}
+
+assert.is_association() #{{{1
+{
+    local var_name
+    local expect actual
+
+    if (( $# != 1 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    var_name=$argv[1]
+    expect="association"
+    actual="$(eval "echo $(printf '${(t)%s}' $var_name)")"
+
+    if [[ $actual =~ ^$expect ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$var_name] to be $expect\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.is_association()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: $expect\n"
+        log FAILURE --indent 4 --skip-date "       got: $actual\n\n"
+    fi
+}
+
+assert.is_not_association() #{{{1
+{
+    local var_name
+    local expect actual
+
+    if (( $# != 1 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    var_name=$argv[1]
+    expect="association"
+    actual="$(eval "echo $(printf '${(t)%s}' $var_name)")"
+
+    if [[ ! $actual =~ ^$expect ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$var_name] to be not $expect\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.is_not_association()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: not $expect\n"
+        log FAILURE --indent 4 --skip-date "       got:     $actual\n\n"
+    fi
+}
+
+assert.type_of() #{{{1
+{
+    local var_name var_type
+    local expect actual
+
+    if (( $# != 2 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    var_name=$argv[1]
+    var_type=$argv[2]
+    expect=$var_type
+    actual="$(eval "echo $(printf '${(t)%s}' $var_name)")"
+
+    if [[ $actual =~ ^$expect ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [$expect] to be $actual\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.type_of()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: $expect\n"
+        log FAILURE --indent 4 --skip-date "       got: $actual\n\n"
+    fi
+}
+
+assert.length_of() #{{{1
+{
+    :
+}
+
+assert.key_exists() #{{{1
+{
+    :
+}
+
+assert.key_not_exists() #{{{1
+{
+    :
+}
+
+assert.has_key() #{{{1
+{
+    :
+}
+
+assert.exists() #{{{1
+{
+    :
+}
+
+assert.empty() #{{{1
+{
+    :
+}
+
+assert.not_empty() #{{{1
+{
+    :
+}
+
+assert.array_equals() #{{{1
+{
+    local    __name_a __name_b
+    local -a _array_a _array_b
+    local    expect actual
+
+    if (( $# != 2 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    __name_a=$argv[1]
+    __name_b=$argv[2]
+    _array_a=( $(eval "echo $(printf "$%s" $__name_a)") )
+    _array_b=( $(eval "echo $(printf "$%s" $__name_b)") )
+    expect="${(j::)${(on)_array_a[@]}}"
+    actual="${(j::)${(on)_array_b[@]}}"
+
+    if [[ $expect == $actual ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [ $(put "%s " ${(qq)_array_a})] to equal [ $(put "%s " ${(qq)_array_b})]\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.array_equals()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: [ $(put "%s " ${(qq)_array_a})]\n"
+        log FAILURE --indent 4 --skip-date "       got: [ $(put "%s " ${(qq)_array_b})]\n\n"
+    fi
+}
+
+assert.array_not_equals() #{{{1
+{
+    local    __name_a __name_b
+    local -a _array_a _array_b
+    local    expect actual
+
+    if (( $# != 2 )); then
+        let test_failed++
+        test_suites+=(2)
+        log FAILURE2 --indent 4 "Bad syntax: too few/many arguments\n"
+        return 1
+    fi
+
+    __name_a=$argv[1]
+    __name_b=$argv[2]
+    _array_a=( $(eval "echo $(printf "$%s" $__name_a)") )
+    _array_b=( $(eval "echo $(printf "$%s" $__name_b)") )
+    expect="${(j::)${(on)_array_a[@]}}"
+    actual="${(j::)${(on)_array_b[@]}}"
+
+    if [[ $expect != $actual ]]; then
+        let test_passed++
+        test_suites+=(0)
+        $is_verbose_at_main && \
+            log SUCCESS --indent 4 "Expected [ $(put "%s " ${(qq)_array_a})] not to equal [ $(put "%s " ${(qq)_array_b})]\n"
+    else
+        let test_failed++
+        test_suites+=(1)
+        log TITLE   --indent 4 "$#test_suites) assert.array_equals()\n"
+        log FAILURE --indent 4 --skip-date "Failure/Error\n"
+        log FAILURE --indent 4 --skip-date "  expected: not [ $(put "%s " ${(qq)_array_a})]\n"
+        log FAILURE --indent 4 --skip-date "       got:     [ $(put "%s " ${(qq)_array_b})]\n\n"
+    fi
+}
+
+# main {{{1
+main() {
+    local log_pat="INFO"
+    local -F SECONDS=0
+    local -i i=1 exit_status=0
+    local -a test_files files dirs
+
+    while (( $# > 0 )); do
+        case "$1" in
+            -v|--verbose)
+                is_verbose_at_main=true
+                ;;
+            *)
+                if [[ -d $1 ]]; then
+                    dirs+=("$1")
+                else
+                    files+=("$1")
+                fi
+                ;;
+        esac
+        shift
+    done
+
+    test_files=(
+    ${^${~dirs[@]}}/*_test.zsh(N-.)
+    ${^${~files[@]}}(N-.)
+    )
+    is_tested() {
+        (( $#test_suites > 0 ))
+    }
+    multi_testfiles() {
+        (( $#test_files > 1 ))
+    }
+    single_testfile() {
+        (( $#test_files == 1 ))
+    }
+    multi_testfiles && is_verbose_at_main=false
+
+    local    spaces
+    local -i max=0 num=0
+    for ((i=1; i <= $#test_files; i++)); do
+        (( ${#test_files[i]} > $max )) && max=${#test_files[i]}
+    done
+
+    for ((i=1; i <= $#test_files; i++)); do
+        # Initialize
+        test_suites=()
+        test_passed=0
+        test_failed=0
+
+        source "${test_files[i]}"
+        if is_tested && multi_testfiles; then
+            spaces=""
+            num=$(( $max - ${#test_files[i]} ))
+            repeat $num { spaces="$spaces "; }
+            log TITLE "${test_files[i]/$PWD/.} $spaces"
+        fi
+
+        if (( test_failed > 0 )); then
+            log_pat="FAIL"
+            let exit_status++
+        else
+            log_pat="PASS"
+        fi
+
+        single_testfile && put "\n"
+        show_test_flags
+        if single_testfile; then
+            log "$log_pat" "Finished in $(put "%f" $SECONDS) seconds\n"
+            log "$log_pat" "$#test_suites examples, $test_failed failures\n"
+            if (( ! $i == $#test_files )); then
+                put "\n"
+                repeat ${COLUMNS:-80} { put "=" }
+                put "\n\n"
+            fi
+        fi
+    done
+    if multi_testfiles; then
+        (( exit_status != 0 )) && log_pat=FAIL
+        log "$log_pat" "Finished in $(put "%f" $SECONDS) seconds\n"
+    fi
+
+    exit $exit_status
+}
+
+main "$@"
+
+# {{{1
+# vim: foldmethod=marker foldcolumn=3 foldlevel=0
