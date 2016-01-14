@@ -11,13 +11,17 @@ typeset -i test_failed=0
 typeset -i test_passed=0
 
 # grammer
-typeset -i zspec_indent=0
-typeset -i zspec_it=0
-typeset -i zspec_describe=0
+# typeset -i zspec_indent=0
+# typeset -i zspec_it=0
+# typeset -i zspec_describe=0
+typeset -i count_desc=0
+typeset -i count_it=0
 
 autoload -Uz colors; colors
-autoload -Uz add-zsh-hook
-add-zsh-hook zshexit pre_exit
+# autoload -Uz add-zsh-hook
+# add-zsh-hook zshexit pre_exit
+
+typeset cwd="$PWD"
 
 # print {{{1
 die() {
@@ -197,14 +201,15 @@ validator() {
     done
 }
 
-pre_exit() {
-    validator
-}
+# pre_exit() {
+#     validator
+# }
 
 # syntax {{{1
 describe() {
-    let zspec_indent++
-    zspec_describe=1
+    # let zspec_describe++
+    let count_desc++
+
     if (( $# == 0 )); then
         log WARN "you should give the description to 'describe'\n"
     else
@@ -214,11 +219,16 @@ describe() {
 }
 
 it() {
-    let zspec_indent++
-    zspec_it=1
-    if (( zspec_describe == 0 )); then
+    # let zspec_it++
+    let count_it++
+
+    if (( $count_desc == 0 )); then
         log ERROR "$funcstack[1]: must be used in 'describe' block\n"
+        exit 1
     fi
+    # if (( zspec_describe == 0 )); then
+    #     log ERROR "$funcstack[1]: must be used in 'describe' block\n"
+    # fi
     if (( $# == 0 )); then
         log WARN "you should give the description to 'it'\n"
     else
@@ -228,16 +238,26 @@ it() {
 }
 
 end() {
-    let zspec_indent--
-    if (( zspec_it == 1 )); then
-        zspec_it=0
-    elif (( zspec_describe == 1 )); then
-        zspec_describe=0
+    # let zspec_indent--
+
+    if (( count_it > 0 )); then
+        let count_it--
+    elif (( count_desc > 0 )); then
+        let count_desc--
+    else
+        log ERROR "$funcstack[1]: unexpected 'end' word\n"
+        exit 1
     fi
 
-    (( zspec_indent >= 0 )) && return 0
-    log ERROR "$funcstack[1]: unexpected 'end' word\n"
-    exit 1
+    # if (( zspec_it > 0 )); then
+    #     let zspec--
+    # elif (( zspec_describe > 0 )); then
+    #     let zspec_describe--
+    # fi
+    #
+    # (( zspec_indent >= 0 )) && return 0
+    # log ERROR "$funcstack[1]: unexpected 'end' word\n"
+    # exit 1
 }
 
 assert.true() #{{{1
@@ -958,7 +978,7 @@ main() {
             spaces=""
             num=$(( $max - ${#test_files[i]} ))
             repeat $num { spaces="$spaces "; }
-            log TITLE "${test_files[i]/$PWD/.} $spaces"
+            log TITLE "${test_files[i]/$cwd/.} $spaces"
         fi
 
         if (( test_failed > 0 )); then
