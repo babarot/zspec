@@ -18,8 +18,6 @@ typeset -i count_desc=0
 typeset -i count_it=0
 
 autoload -Uz colors; colors
-# autoload -Uz add-zsh-hook
-# add-zsh-hook zshexit pre_exit
 
 typeset cwd="$PWD"
 
@@ -200,10 +198,6 @@ validator() {
         log WARN "you should use 'end' keyword ending with '${end_keyword}'\n"
     done
 }
-
-# pre_exit() {
-#     validator
-# }
 
 # syntax {{{1
 describe() {
